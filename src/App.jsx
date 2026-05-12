@@ -1,4 +1,5 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { supabase } from "./supabase";
 
 const WALLET_NAMES = ["Wave", "Orange Money", "Cash", "Banque"];
 const CATEGORIES = ["nourriture", "transport", "loyer", "télécom", "santé"];
@@ -10,52 +11,14 @@ const CATEGORY_META = {
   télécom: { icon: "📶", color: "#14B8A6" },
   santé: { icon: "💊", color: "#EF4444" },
 };
-
-const initialState = {
-  wallets: {
-    Wave: 70000,
-    "Orange Money": 45000,
-    Cash: 25000,
-    Banque: 120000,
-  },
-  transactions: [
-    {
-      id: "seed-1",
-      amount: 15000,
-      wallet: "Wave",
-      type: "revenu",
-      category: "télécom",
-      date: new Date().toISOString(),
-    },
-    {
-      id: "seed-2",
-      amount: 5000,
-      wallet: "Cash",
-      type: "dépense",
-      category: "transport",
-      date: new Date(Date.now() - 86400000).toISOString(),
-    },
-  ],
-  savingsGoals: {},
-  claudeApiKey: "",
+const DEFAULT_WALLETS = {
+  Wave: 70000,
+  "Orange Money": 45000,
+  Cash: 25000,
+  Banque: 120000,
 };
 
-function loadState() {
-  try {
-    const raw = localStorage.getItem("gesfin-data");
-    if (!raw) return initialState;
-    const parsed = JSON.parse(raw);
-    if (!parsed.wallets || !parsed.transactions) return initialState;
-    return {
-      ...initialState,
-      ...parsed,
-      savingsGoals: parsed.savingsGoals || {},
-      claudeApiKey: parsed.claudeApiKey || "",
-    };
-  } catch {
-    return initialState;
-  }
-}
+const emptyData = { wallets: { ...DEFAULT_WALLETS }, transactions: [] };
 
 function formatFcfa(value) {
   return new Intl.NumberFormat("fr-FR").format(value) + " FCFA";
@@ -135,39 +98,159 @@ async function extractBalanceFromImage({ dataUrl, apiKey, mediaType }) {
 
 function App() {
   const [screen, setScreen] = useState("dashboard");
-  const [data, setData] = useState(loadState);
+  const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState(emptyData);
   const [selectedMonth, setSelectedMonth] = useState(monthKeyFromDate(new Date()));
   const [form, setForm] = useState({ amount: "", wallet: "Wave", type: "dépense", category: "nourriture" });
   const [goalInput, setGoalInput] = useState("");
+  const [authMode, setAuthMode] = useState("login");
+  const [authForm, setAuthForm] = useState({ email: "", password: "" });
+  const [authMessage, setAuthMessage] = useState("");
+  const [goalByMonth, setGoalByMonth] = useState({});
+  const [claudeApiKey, setClaudeApiKey] = useState("");
   const [scannerState, setScannerState] = useState({ loading: false, message: "" });
   const fileInputRef = useRef(null);
 
-  const persist = (next) => {
-    setData(next);
-    localStorage.setItem("gesfin-data", JSON.stringify(next));
+  const saveLocalPrefs = (userId, nextGoals, nextApiKey) => {
+    const payload = { savingsGoals: nextGoals, claudeApiKey: nextApiKey };
+    localStorage.setItem(`gesfin-prefs-${userId}`, JSON.stringify(payload));
   };
 
-  const handleAddTransaction = (e) => {
+  const loadLocalPrefs = (userId) => {
+    try {
+      const raw = localStorage.getItem(`gesfin-prefs-${userId}`);
+      if (!raw) return { savingsGoals: {}, claudeApiKey: "" };
+      const parsed = JSON.parse(raw);
+      return {
+        savingsGoals: parsed?.savingsGoals || {},
+        claudeApiKey: parsed?.claudeApiKey || "",
+      };
+    } catch {
+      return { savingsGoals: {}, claudeApiKey: "" };
+    }
+  };
+
+  const loadUserData = async (userId) => {
+    setLoading(true);
+    const prefs = loadLocalPrefs(userId);
+    setGoalByMonth(prefs.savingsGoals);
+    setClaudeApiKey(prefs.claudeApiKey);
+
+    const { data: walletRows, error: walletError } = await supabase
+      .from("wallets")
+      .select("name,balance")
+      .eq("user_id", userId);
+    if (walletError) {
+      setLoading(false);
+      return;
+    }
+
+    let normalizedWallets = {};
+    (walletRows || []).forEach((row) => {
+      normalizedWallets[row.name] = Number(row.balance || 0);
+    });
+
+    if (!walletRows || walletRows.length === 0) {
+      const inserts = WALLET_NAMES.map((name) => ({
+        user_id: userId,
+        name,
+        balance: DEFAULT_WALLETS[name],
+      }));
+      await supabase.from("wallets").insert(inserts);
+      normalizedWallets = { ...DEFAULT_WALLETS };
+    } else {
+      WALLET_NAMES.forEach((name) => {
+        if (normalizedWallets[name] == null) normalizedWallets[name] = 0;
+      });
+    }
+
+    const { data: txRows } = await supabase
+      .from("transactions")
+      .select("id,wallet,amount,type,category,created_at")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+
+    setData({
+      wallets: normalizedWallets,
+      transactions: (txRows || []).map((tx) => ({
+        id: tx.id,
+        wallet: tx.wallet,
+        amount: Number(tx.amount),
+        type: tx.type,
+        category: tx.category,
+        date: tx.created_at,
+      })),
+    });
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    supabase.auth.getSession().then(({ data: authData }) => {
+      if (!mounted) return;
+      setSession(authData.session);
+      if (authData.session?.user?.id) {
+        loadUserData(authData.session.user.id);
+      } else {
+        setLoading(false);
+      }
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      if (nextSession?.user?.id) {
+        loadUserData(nextSession.user.id);
+      } else {
+        setData(emptyData);
+      }
+    });
+
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  const handleAuth = async (e) => {
     e.preventDefault();
+    setAuthMessage("");
+    if (!authForm.email || !authForm.password) return;
+    if (authMode === "login") {
+      const { error } = await supabase.auth.signInWithPassword(authForm);
+      if (error) setAuthMessage(error.message);
+    } else {
+      const { error } = await supabase.auth.signUp(authForm);
+      if (error) {
+        setAuthMessage(error.message);
+      } else {
+        setAuthMessage("Compte créé. Vérifie ton email si confirmation demandée.");
+      }
+    }
+  };
+
+  const handleAddTransaction = async (e) => {
+    e.preventDefault();
+    if (!session?.user?.id) return;
     const amount = Number(form.amount);
     if (!amount || amount <= 0) return;
 
     const transaction = {
-      id: crypto.randomUUID(),
       amount,
       wallet: form.wallet,
       type: form.type,
       category: form.category,
-      date: new Date().toISOString(),
+      user_id: session.user.id,
     };
 
     const sign = form.type === "revenu" ? 1 : -1;
-    const nextWallets = {
-      ...data.wallets,
-      [form.wallet]: Math.max(0, (data.wallets[form.wallet] || 0) + sign * amount),
-    };
-
-    persist({ ...data, wallets: nextWallets, transactions: [transaction, ...data.transactions] });
+    const nextBalance = Math.max(0, (data.wallets[form.wallet] || 0) + sign * amount);
+    await supabase.from("transactions").insert(transaction);
+    await supabase.from("wallets").upsert(
+      { user_id: session.user.id, name: form.wallet, balance: nextBalance },
+      { onConflict: "user_id,name" }
+    );
+    await loadUserData(session.user.id);
     setForm((prev) => ({ ...prev, amount: "" }));
     setScreen("dashboard");
   };
@@ -203,20 +286,27 @@ function App() {
     return { revenus, depenses, epargne, byCategory, maxCat, donutData };
   }, [data.transactions, selectedMonth]);
 
-  const goalForMonth = Number(data.savingsGoals[selectedMonth] || 0);
+  const goalForMonth = Number(goalByMonth[selectedMonth] || 0);
   const goalProgress = goalForMonth > 0 ? Math.min(100, Math.round((Math.max(0, monthly.epargne) / goalForMonth) * 100)) : 0;
 
   const handleSaveGoal = (e) => {
     e.preventDefault();
+    if (!session?.user?.id) return;
     const goal = Math.max(0, Number(goalInput || 0));
-    persist({ ...data, savingsGoals: { ...data.savingsGoals, [selectedMonth]: goal } });
+    const nextGoals = { ...goalByMonth, [selectedMonth]: goal };
+    setGoalByMonth(nextGoals);
+    saveLocalPrefs(session.user.id, nextGoals, claudeApiKey);
     setGoalInput("");
   };
 
-  const handleApiKeyChange = (value) => persist({ ...data, claudeApiKey: value.trim() });
+  const handleApiKeyChange = (value) => {
+    const next = value.trim();
+    setClaudeApiKey(next);
+    if (session?.user?.id) saveLocalPrefs(session.user.id, goalByMonth, next);
+  };
 
   const handleScanClick = () => {
-    if (!data.claudeApiKey) {
+    if (!claudeApiKey) {
       setScannerState({ loading: false, message: "Ajoute d'abord ta clé API Claude Vision." });
       return;
     }
@@ -224,6 +314,7 @@ function App() {
   };
 
   const handleScanImage = async (event) => {
+    if (!session?.user?.id) return;
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
@@ -233,7 +324,7 @@ function App() {
       const dataUrl = await fileToDataUrl(file);
       const { wallet, balance } = await extractBalanceFromImage({
         dataUrl,
-        apiKey: data.claudeApiKey,
+        apiKey: claudeApiKey,
         mediaType: file.type || "image/jpeg",
       });
 
@@ -241,17 +332,84 @@ function App() {
         throw new Error("Wallet non reconnu. Utilise une capture Wave ou Orange Money lisible.");
       }
 
-      persist({ ...data, wallets: { ...data.wallets, [wallet]: balance } });
+      await supabase.from("wallets").upsert(
+        { user_id: session.user.id, name: wallet, balance },
+        { onConflict: "user_id,name" }
+      );
+      await loadUserData(session.user.id);
       setScannerState({ loading: false, message: `Solde ${wallet} mis à jour: ${formatFcfa(balance)}.` });
     } catch (error) {
       setScannerState({ loading: false, message: error.message || "Erreur pendant le scan." });
     }
   };
 
+  if (loading) {
+    return (
+      <div className="mx-auto flex min-h-screen w-full max-w-md items-center justify-center bg-[#0F0F0F] text-white">
+        Chargement...
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div className="mx-auto min-h-screen w-full max-w-md bg-[#0F0F0F] px-4 py-8 text-white">
+        <section className="rounded-2xl border border-[#2A2A2A] bg-[#1A1A1A] p-5 shadow-[0_10px_30px_rgba(0,0,0,0.35)]">
+          <h1 className="text-2xl font-extrabold">GesFin</h1>
+          <p className="mt-1 text-sm text-[#888888]">Connexion sécurisée avec Supabase</p>
+          <div className="mt-4 flex gap-2">
+            <button
+              className={`rounded-full px-4 py-1 text-sm ${authMode === "login" ? "bg-[#1D9E75] text-white" : "bg-[#121212] text-[#888888]"}`}
+              onClick={() => setAuthMode("login")}
+              type="button"
+            >
+              Connexion
+            </button>
+            <button
+              className={`rounded-full px-4 py-1 text-sm ${authMode === "signup" ? "bg-[#1D9E75] text-white" : "bg-[#121212] text-[#888888]"}`}
+              onClick={() => setAuthMode("signup")}
+              type="button"
+            >
+              Inscription
+            </button>
+          </div>
+          <form className="mt-4 space-y-3" onSubmit={handleAuth}>
+            <input
+              className="input-dark"
+              type="email"
+              placeholder="email"
+              value={authForm.email}
+              onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
+              required
+            />
+            <input
+              className="input-dark"
+              type="password"
+              placeholder="mot de passe"
+              value={authForm.password}
+              onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+              required
+            />
+            <button className="w-full rounded-xl bg-[#1D9E75] py-2 font-semibold text-white" type="submit">
+              {authMode === "login" ? "Se connecter" : "Créer un compte"}
+            </button>
+          </form>
+          {authMessage && <p className="mt-3 text-xs text-[#888888]">{authMessage}</p>}
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto min-h-screen w-full max-w-md bg-[#0F0F0F] text-white">
       <main className="space-y-4 px-4 pb-24 pt-6 animate-fade-in">
         <HeaderCard totalBalance={totalBalance} />
+        <div className="flex items-center justify-between rounded-xl border border-[#2A2A2A] bg-[#1A1A1A] px-3 py-2 text-xs text-[#888888]">
+          <span>{session.user.email}</span>
+          <button className="text-[#1D9E75]" onClick={() => supabase.auth.signOut()} type="button">
+            Déconnexion
+          </button>
+        </div>
 
         <MonthPills selectedMonth={selectedMonth} setSelectedMonth={setSelectedMonth} monthOptions={monthOptions} />
 
@@ -288,7 +446,7 @@ function App() {
                 className="mb-3 w-full rounded-xl border border-[#2A2A2A] bg-[#121212] px-3 py-2 text-sm text-white outline-none focus:border-[#1D9E75]"
                 type="password"
                 placeholder="sk-ant-..."
-                value={data.claudeApiKey}
+                value={claudeApiKey}
                 onChange={(e) => handleApiKeyChange(e.target.value)}
               />
               <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleScanImage} />
