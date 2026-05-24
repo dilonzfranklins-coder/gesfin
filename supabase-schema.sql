@@ -16,7 +16,10 @@ create table if not exists public.transactions (
   wallet text not null check (wallet in ('Wave', 'Orange Money', 'Cash', 'Banque')),
   amount bigint not null check (amount > 0),
   type text not null check (type in ('revenu', 'dépense')),
-  category text not null check (category in ('nourriture', 'transport', 'loyer', 'télécom', 'santé')),
+  category text not null check (category in (
+    'nourriture', 'transport', 'loyer', 'télécom', 'santé',
+    'salaire', 'business', 'autre'
+  )),
   created_at timestamptz not null default now()
 );
 
@@ -65,4 +68,33 @@ with check (auth.uid() = user_id);
 
 create policy "transactions_delete_own"
 on public.transactions for delete
+using (auth.uid() = user_id);
+
+create table if not exists public.savings_goals (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  month_key text not null,
+  amount bigint not null default 0 check (amount >= 0),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, month_key)
+);
+
+alter table public.savings_goals enable row level security;
+
+create policy "savings_goals_select_own"
+on public.savings_goals for select
+using (auth.uid() = user_id);
+
+create policy "savings_goals_insert_own"
+on public.savings_goals for insert
+with check (auth.uid() = user_id);
+
+create policy "savings_goals_update_own"
+on public.savings_goals for update
+using (auth.uid() = user_id)
+with check (auth.uid() = user_id);
+
+create policy "savings_goals_delete_own"
+on public.savings_goals for delete
 using (auth.uid() = user_id);

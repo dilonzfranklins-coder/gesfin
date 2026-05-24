@@ -3,21 +3,29 @@
 @tailwind utilities;
 
 body {
-  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  background-color: #080b12;
+  color: #f0f4ff;
 }
 
-.input-dark {
+.input-gesfin {
   width: 100%;
   border-radius: 12px;
-  border: 1px solid #2a2a2a;
-  background: #121212;
-  color: #ffffff;
-  padding: 10px 12px;
+  border: 1px solid #1e2d45;
+  background: #141c2e;
+  color: #f0f4ff;
+  padding: 12px 14px;
   outline: none;
+  font-family: "Space Mono", monospace;
+  transition: border-color 0.2s;
 }
 
-.input-dark:focus {
-  border-color: #1d9e75;
+.input-gesfin:focus {
+  border-color: #00e5a0;
+}
+
+.input-gesfin::placeholder {
+  color: #8892aa;
 }
 
 .hide-scrollbar {
@@ -41,11 +49,21 @@ body {
 @keyframes slideUp {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes glowPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 20px rgba(0, 229, 160, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(0, 229, 160, 0.3);
   }
 }
 
@@ -54,5 +72,16 @@ body {
 }
 
 .animate-slide-up {
-  animation: slideUp 0.35s ease-out;
+  animation: slideUp 0.4s ease-out;
+}
+
+.animate-glow {
+  animation: glowPulse 3s ease-in-out infinite;
+}
+
+.gesfin-logo {
+  background: linear-gradient(135deg, #00e5a0 0%, #7b61ff 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
